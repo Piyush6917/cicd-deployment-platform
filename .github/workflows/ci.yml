@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -9,8 +9,12 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
-  test:
+  build-and-push:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,5 +34,23 @@ jobs:
       - name: Run tests
         run: pytest
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::105508555730:role/newnightproject
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build Docker image
-        run: docker build -t cici-deploy:${{ github.sha }} .
+        run: |
+          docker build -t ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} .
+          docker tag ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} \
+            ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:latest
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:latest
