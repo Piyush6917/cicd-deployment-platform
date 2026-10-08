@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
@@ -46,11 +45,69 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} .
-          docker tag ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} \
+          docker build \
+            -t ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} .
+
+          docker tag \
+            ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }} \
             ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:latest
 
       - name: Push Docker image
         run: |
           docker push ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:${{ github.sha }}
           docker push ${{ steps.login-ecr.outputs.registry }}/cicd-deployment-platform:latest
+
+      - name: Deploy to EC2 using SSM
+        id: deploy
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --region ap-south-1 \
+            --instance-ids i-08d540052108462a7 \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 105508555730.dkr.ecr.ap-south-1.amazonaws.com",
+              "docker pull 105508555730.dkr.ecr.ap-south-1.amazonaws.com/cicd-deployment-platform:latest",
+              "docker rm -f cicd-app || true",
+              "docker run -d --name cicd-app -p 8080:5000 105508555730.dkr.ecr.ap-south-1.amazonaws.com/cicd-deployment-platform:latest",
+              "sleep 5",
+              "curl --fail http://localhost:8080/health"
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          for i in {1..30}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --region ap-south-1 \
+              --command-id "$COMMAND_ID" \
+              --instance-id i-08d540052108462a7 \
+              --query "Status" \
+              --output text)
+
+            echo "Deployment status: $STATUS"
+
+            if [ "$STATUS" = "Success" ]; then
+              echo "Deployment successful!"
+              exit 0
+            fi
+
+            if [ "$STATUS" = "Failed" ] || \
+               [ "$STATUS" = "Cancelled" ] || \
+               [ "$STATUS" = "TimedOut" ]; then
+
+              echo "Deployment failed."
+
+              aws ssm get-command-invocation \
+                --region ap-south-1 \
+                --command-id "$COMMAND_ID" \
+                --instance-id i-08d540052108462a7
+
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          echo "Deployment timed out."
+          exit 1
